@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 @torch.no_grad()
 def detect_language(
-    model: "Whisper", mel: Tensor, tokenizer: Tokenizer = None
+    model: "Whisper", mel: Tensor, reference_text, tokenizer: Tokenizer = None, 
 ) -> Tuple[Tensor, List[dict]]:
     """
     Detect the spoken language in the audio, and return them as list of strings, along with the ids
@@ -52,7 +52,8 @@ def detect_language(
     # forward pass using a single token, startoftranscript
     n_audio = mel.shape[0]
     x = torch.tensor([[tokenizer.sot]] * n_audio).to(mel.device)  # [n_audio, 1]
-    logits = model.logits(x, mel)[:, 0]
+    # TODO: Replace Reference Text Input
+    logits = model.logits(x, mel, reference_text)[:, 0]
 
     # collect detected languages; suppress all non-language tokens
     mask = torch.ones(logits.shape[-1], dtype=torch.bool)
@@ -146,19 +147,15 @@ class PyTorchInference(Inference):
         self.kv_cache = {}
         self.hooks = []
 
-        key_modules = [block.attn.key for block in self.model.decoder.blocks]
-        value_modules = [block.attn.value for block in self.model.decoder.blocks]
-        self.kv_modules = key_modules + value_modules
-
-    def logits(self, tokens: Tensor, audio_features: Tensor) -> Tensor:
+    def logits(self, tokens: Tensor, audio_features: Tensor, ref_features: Tensor, ref_mask: Tensor) -> Tensor:
         if not self.kv_cache:
             self.kv_cache, self.hooks = self.model.install_kv_cache_hooks()
 
         if tokens.shape[-1] > self.initial_token_length:
             # only need to use the last token except in the first forward pass
             tokens = tokens[:, -1:]
-
-        return self.model.decoder(tokens, audio_features, kv_cache=self.kv_cache)
+        return self.model.decoder(tokens, audio_features, xb = ref_features, kv_cache=self.kv_cache, ref_mask=ref_mask)
+        # return self.model.decoder.get_logit_without_ref(tokens, xa = audio_features, kv_cache=self.kv_cache)
 
     def cleanup_caching(self):
         for hook in self.hooks:
@@ -168,10 +165,9 @@ class PyTorchInference(Inference):
         self.hooks = []
 
     def rearrange_kv_cache(self, source_indices):
-        if source_indices != list(range(len(source_indices))):
-            for module in self.kv_modules:
-                # update the key/value cache to contain the selected sequences
-                self.kv_cache[module] = self.kv_cache[module][source_indices].detach()
+        for module, tensor in self.kv_cache.items():
+            # update the key/value cache to contain the selected sequences
+            self.kv_cache[module] = tensor[source_indices].detach()
 
 
 class SequenceRanker:
@@ -657,6 +653,9 @@ class DecodingTask:
             )
 
         return audio_features
+    
+    def _get_ref_features(self, ref_text: Tensor):
+        return self.model.ref_encoder(ref_text)
 
     def _detect_language(self, audio_features: Tensor, tokens: Tensor):
         languages = [self.options.language] * audio_features.shape[0]
@@ -672,14 +671,15 @@ class DecodingTask:
 
         return languages, lang_probs
 
-    def _main_loop(self, audio_features: Tensor, tokens: Tensor):
+    def _main_loop(self, audio_features: Tensor, tokens: Tensor, ref_features: Tensor, ref_mask: Tensor):
+        assert audio_features.shape[0] == tokens.shape[0]
         n_batch = tokens.shape[0]
         sum_logprobs: Tensor = torch.zeros(n_batch, device=audio_features.device)
         no_speech_probs = [np.nan] * n_batch
 
         try:
             for i in range(self.sample_len):
-                logits = self.inference.logits(tokens, audio_features)
+                logits = self.inference.logits(tokens, audio_features, ref_features, ref_mask)
 
                 if (
                     i == 0 and self.tokenizer.no_speech is not None
@@ -705,12 +705,13 @@ class DecodingTask:
         return tokens, sum_logprobs, no_speech_probs
 
     @torch.no_grad()
-    def run(self, mel: Tensor) -> List[DecodingResult]:
+    def run(self, mel: Tensor, ref_text: Tensor, ref_attn_mask: Tensor) -> List[DecodingResult]:
         self.decoder.reset()
         tokenizer: Tokenizer = self.tokenizer
         n_audio: int = mel.shape[0]
 
         audio_features: Tensor = self._get_audio_features(mel)  # encoder forward pass
+        ref_features: Tensor = self._get_ref_features(ref_text)
         tokens: Tensor = torch.tensor([self.initial_tokens]).repeat(n_audio, 1)
 
         # detect language if requested, overwriting the language token
@@ -725,11 +726,14 @@ class DecodingTask:
                 )
             ]
 
-        # repeat text tensors by the group size, for beam search or best-of-n sampling
+        # repeat the audio & text tensors by the group size, for beam search or best-of-n sampling
+        audio_features = audio_features.repeat_interleave(self.n_group, dim=0)
+        ref_features = ref_features.repeat_interleave(self.n_group, dim=0).to(audio_features.device)
         tokens = tokens.repeat_interleave(self.n_group, dim=0).to(audio_features.device)
 
-        # call the main sampling loop
-        tokens, sum_logprobs, no_speech_probs = self._main_loop(audio_features, tokens)
+        # call the main sampling loop 
+        #추가
+        tokens, sum_logprobs, no_speech_probs = self._main_loop(audio_features, tokens, ref_features, ref_attn_mask)
 
         # reshape the tensors to have (n_audio, n_group) as the first two dimensions
         audio_features = audio_features[:: self.n_group]
@@ -788,6 +792,8 @@ class DecodingTask:
 def decode(
     model: "Whisper",
     mel: Tensor,
+    ref_text: Tensor,
+    ref_attn_mask: Tensor,
     options: DecodingOptions = DecodingOptions(),
     **kwargs,
 ) -> Union[DecodingResult, List[DecodingResult]]:
@@ -815,7 +821,7 @@ def decode(
 
     if kwargs:
         options = replace(options, **kwargs)
-
-    result = DecodingTask(model, options).run(mel)
+    
+    result = DecodingTask(model, options).run(mel, ref_text, ref_attn_mask)
 
     return result[0] if single else result

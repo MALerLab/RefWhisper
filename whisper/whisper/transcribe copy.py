@@ -18,7 +18,7 @@ from .audio import (
 )
 from .decoding import DecodingOptions, DecodingResult
 from .timing import add_word_timestamps
-from .tokenizer import LANGUAGES, TO_LANGUAGE_CODE, get_tokenizer, RefProcessor
+from .tokenizer import LANGUAGES, TO_LANGUAGE_CODE, get_tokenizer
 from .utils import (
     exact_div,
     format_timestamp,
@@ -28,7 +28,6 @@ from .utils import (
     optional_int,
     str2bool,
 )
-from . import inference_hack as hack
 
 if TYPE_CHECKING:
     from .model import Whisper
@@ -37,7 +36,9 @@ if TYPE_CHECKING:
 def transcribe(
     model: "Whisper",
     audio: Union[str, np.ndarray, torch.Tensor],
-    reference_text: str,
+    #추가하였습니다
+    around_text,
+    ##
     *,
     verbose: Optional[bool] = None,
     temperature: Union[float, Tuple[float, ...]] = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
@@ -132,7 +133,7 @@ def transcribe(
                     "Detecting language using up to the first 30 seconds. Use `--language` to specify the language"
                 )
             mel_segment = pad_or_trim(mel, N_FRAMES).to(model.device).to(dtype)
-            _, probs = model.detect_language(mel = mel_segment, reference_text=reference_text)
+            _, probs = model.detect_language(mel = mel_segment, reference_text=around_text)
             decode_options["language"] = max(probs, key=probs.get)
             if verbose is not None:
                 print(
@@ -141,24 +142,12 @@ def transcribe(
 
     language: str = decode_options["language"]
     task: str = decode_options.get("task", "transcribe")
-    
-    ref_text_processor = RefProcessor(model.dims.n_ref_text_ctx, multilingual=model.is_multilingual, language=language, task=task)
-    tokenizer = ref_text_processor.tokenizer
-    
-    n_segments = -(-content_frames//N_FRAMES)
-    # print(f"Num Segment is :{n_segments}")
-    reference_text = ref_text_processor(reference_text, n_segments).to(model.device)
-    ref_attn_mask = (reference_text != ref_text_processor.pad_idx).to(torch.long).to(model.device)
-    # len_ref_text = (reference_text != ref_text_processor.pad_idx).sum().item() - 1
-    # ref_attn_mask = torch.ones(1, reference_text.shape[1], dtype=torch.long).to(model.device)
-    # ref_attn_mask[len_ref_text:] = 0
-    
-    # tokenizer = get_tokenizer(model.is_multilingual, language=language, task=task)
+    tokenizer = get_tokenizer(model.is_multilingual, language=language, task=task)
 
     if word_timestamps and task == "translate":
         warnings.warn("Word-level timestamps on translations may not be reliable.")
 
-    def decode_with_fallback(segment: torch.Tensor, ref_segment: torch.Tensor, ref_attn_mask: torch.Tensor) -> DecodingResult:
+    def decode_with_fallback(segment: torch.Tensor) -> DecodingResult:
         temperatures = (
             [temperature] if isinstance(temperature, (int, float)) else temperature
         )
@@ -176,7 +165,7 @@ def transcribe(
 
             options = DecodingOptions(**kwargs, temperature=t)
             #추가 around_text
-            decode_result = model.decode(segment, ref_segment, ref_attn_mask, options)
+            decode_result = model.decode(segment, around_text, options)
 
             needs_fallback = False
             if (
@@ -234,25 +223,18 @@ def transcribe(
         }
 
     # show the progress bar when verbose is False (if True, transcribed text will be printed)
-    hack.NUM_ENCODED = 0
-    hack.SEEK_LIST = []
     with tqdm.tqdm(
         total=content_frames, unit="frames", disable=verbose is not False
     ) as pbar:
         while seek < content_frames:
-            hack.SEEK = seek
-            hack.SEEK_LIST.append(seek)
             time_offset = float(seek * HOP_LENGTH / SAMPLE_RATE)
             mel_segment = mel[:, seek : seek + N_FRAMES]
             segment_size = min(N_FRAMES, content_frames - seek)
             segment_duration = segment_size * HOP_LENGTH / SAMPLE_RATE
             mel_segment = pad_or_trim(mel_segment, N_FRAMES).to(model.device).to(dtype)
-            seg_i = seek // N_FRAMES
-            ref_segment = reference_text[seg_i:seg_i+1]
-            ref_mask_segment = ref_attn_mask[seg_i:seg_i+1]
 
             decode_options["prompt"] = all_tokens[prompt_reset_since:]
-            result: DecodingResult = decode_with_fallback(mel_segment, ref_segment, ref_mask_segment)
+            result: DecodingResult = decode_with_fallback(mel_segment)
             tokens = torch.tensor(result.tokens)
 
             if no_speech_threshold is not None:
@@ -273,9 +255,7 @@ def transcribe(
             current_segments = []
 
             timestamp_tokens: torch.Tensor = tokens.ge(tokenizer.timestamp_begin)
-            # TODO: Solve this!
             single_timestamp_ending = timestamp_tokens[-2:].tolist() == [False, True]
-            # single_timestamp_ending = True # Temporal solution
 
             consecutive = torch.where(timestamp_tokens[:-1] & timestamp_tokens[1:])[0]
             consecutive.add_(1)
@@ -303,6 +283,7 @@ def transcribe(
                         )
                     )
                     last_slice = current_slice
+
                 if single_timestamp_ending:
                     # single timestamp at the end means no speech after the last timestamp.
                     seek += segment_size
@@ -391,7 +372,6 @@ def transcribe(
         text=tokenizer.decode(all_tokens[len(initial_prompt_tokens) :]),
         segments=all_segments,
         language=language,
-        
     )
 
 

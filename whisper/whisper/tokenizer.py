@@ -1,11 +1,13 @@
 import base64
 import os
 import string
+from pathlib import Path
 from dataclasses import dataclass, field
 from functools import cached_property, lru_cache
 from typing import Dict, List, Optional, Tuple
 
 import tiktoken
+import torch
 
 LANGUAGES = {
     "en": "english",
@@ -384,3 +386,98 @@ def get_tokenizer(
     encoding = get_encoding(name=encoding_name)
 
     return Tokenizer(encoding=encoding, language=language, task=task)
+
+
+class RefProcessor:
+  def __init__(self, length=256, multilingual=True, language='ko', task='transcribe'):
+    self.tokenizer = get_tokenizer(multilingual=multilingual, language=language, task=task)
+    self.length = length
+    self.pad_idx = 50257
+  
+  def encode_text(self, text: str):
+    return torch.tensor(self.tokenizer.encode(text), dtype=torch.long)
+
+  def pad_sequence(self, text_tokens: List[int]):
+    if len(text_tokens) <= self.length:
+      pad_length = self.length - len(text_tokens)
+      padding = torch.full((pad_length,), self.pad_idx, dtype=torch.long)
+      around_text_ids = torch.cat([text_tokens, padding])
+    elif len(text_tokens) > self.length:
+      around_text_ids = text_tokens[:self.length]
+    return around_text_ids
+  
+  def segment_sequence(self, text: str, num_segments:int):
+    slice_lines = self._get_slice_lines(text, num_segments)
+    text_in_lines = text.split('\n')
+    # text_in_lines = text.split('\n')
+    # num_lines = len(text_in_lines)
+    # num_tokens = len(token_ids)
+    # num_token_per_line = num_tokens / num_lines
+    # num_lines_per_max_len = int(self.length // num_token_per_line - 1)
+    # line_idx_of_final_segment = max(num_lines - num_lines_per_max_len // 2, 0)
+    # slice_lines = [int(line_idx_of_final_segment/ (num_segments - 1) * i) for i in range(num_segments)]
+    
+    # num_remaining_tokens = num_tokens - self.length
+    # num_tokens_per_segment = num_remaining_tokens / (num_segments - 1)
+    # num_lines_per_segment = num_tokens_per_segment / num_token_per_line
+    # slice_lines = [int(num_lines_per_segment * i) for i in range(num_segments)]
+    
+    tokens_in_lines = [self.pad_sequence(self.encode_text('\n'.join(text_in_lines[x:]))) for x in slice_lines]
+    return torch.stack(tokens_in_lines, dim=0)
+  
+  def _get_slice_lines(self, text: str, num_segments:int):
+    text_in_lines = text.split('\n')
+    num_lines = len(text_in_lines)
+    token_ids = self.encode_text(text)
+    num_tokens = len(token_ids)
+    num_token_per_line = num_tokens / num_lines
+    num_lines_per_max_len = int(self.length // num_token_per_line - 1)
+    line_idx_of_final_segment = max(num_lines - num_lines_per_max_len // 2, 0)
+    slice_lines = [int(line_idx_of_final_segment/ (num_segments - 1) * i) for i in range(num_segments)]
+    
+    return slice_lines
+
+  def _check_text_is_path(self, text:str):
+    if '\n' not in text and len(text) < 100 and Path(text).exists():
+      text = Path(text).read_text()
+    return text
+  
+  def get_segment_offset(self, text:str, num_segments:int):
+    if num_segments == 1:
+      return [0]
+    text = self._check_text_is_path(text)
+    slice_lines = self._get_slice_lines(text, num_segments)
+    text_in_lines = text.split('\n')
+    # num_lines = len(text_in_lines)
+    # num_tokens = len(self.encode_text(text))
+    # num_token_per_line = num_tokens / num_lines
+    # num_lines_per_max_len = int(self.length // num_token_per_line - 1)
+    # line_idx_of_final_segment = num_lines - num_lines_per_max_len // 2
+    # slice_lines = [int(line_idx_of_final_segment/ (num_segments - 1) * i) for i in range(num_segments)]
+    
+    entire_len = len(self.encode_text(text))
+    offset_by_segments = [entire_len - len(self.encode_text('\n'.join(text_in_lines[x:]))) for x in slice_lines]
+
+    return offset_by_segments
+  
+  def get_line_offset(self, text):
+    text = self._check_text_is_path(text)
+    text_in_lines = text.split('\n')
+    entire_len = len(self.encode_text(text))
+    offset_by_lines = [entire_len - len(self.encode_text('\n'.join(text_in_lines[x:]))) for x in range(len(text_in_lines))]
+    return offset_by_lines
+
+
+  def __call__(self, text:str, num_mel_segments=1):
+    if not (isinstance(text, str) or isinstance(text, Path)):
+      return text
+    text = self._check_text_is_path(text)
+    if num_mel_segments == 1:
+      token_ids = self.encode_text(text)
+      ref_text_tensor = self.pad_sequence(token_ids)
+      ref_text_tensor = ref_text_tensor.unsqueeze(0)
+    else:
+      ref_text_tensor = self.segment_sequence(text, num_mel_segments)
+  
+    return ref_text_tensor
+  
