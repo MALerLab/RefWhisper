@@ -4,7 +4,7 @@ import random
 from pathlib import Path
 import nlptutti as metrics
 from torch.nn.utils.rnn import pad_sequence
-from whisper.whisper.tokenizer import RefProcessor
+from ref_whisper.whisper.whisper.tokenizer import RefProcessor
 
 class TextProcessor():
   def __init__(self, id_list, lyric_path, each_lyric, random_ratio=0.8, max_len=256):

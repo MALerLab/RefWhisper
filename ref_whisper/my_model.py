@@ -8,9 +8,9 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from whisper.whisper.decoding import decode as decode_function
-from whisper.whisper.decoding import detect_language as detect_language_function
-from whisper.whisper.transcribe import transcribe as transcribe_function
+from ref_whisper.whisper.whisper.decoding import decode as decode_function
+from ref_whisper.whisper.whisper.decoding import detect_language as detect_language_function
+from ref_whisper.whisper.whisper.transcribe import transcribe as transcribe_function
 
 
 @dataclass

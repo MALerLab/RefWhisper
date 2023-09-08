@@ -8,7 +8,7 @@ import wandb
 import argparse
 import datetime
 
-import whisper.whisper as whisper
+import ref_whisper.whisper.whisper as whisper
 
 def get_argument_parser():
   parser = argparse.ArgumentParser()

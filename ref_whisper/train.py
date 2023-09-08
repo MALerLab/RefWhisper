@@ -23,10 +23,10 @@ import datetime
 import time
 import random
 
-import whisper.whisper as whisper
-from data_utils import MinyoDataset, custom_collate_fn, get_wer, get_wer_from_string_pairs
-from my_model import Mymodel
-from trainer import inference, testset_inference, validate, train, get_argument_parser, make_experiment_name_with_date
+import ref_whisper.whisper.whisper as whisper
+from ref_whisper.data_utils import MinyoDataset, custom_collate_fn, get_wer, get_wer_from_string_pairs
+from ref_whisper.my_model import Mymodel
+from ref_whisper.trainer import inference, testset_inference, validate, train, get_argument_parser, make_experiment_name_with_date
 
 
 def main():
