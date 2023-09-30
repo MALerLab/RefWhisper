@@ -577,7 +577,7 @@ def _transcribe_timestamped_efficient(
         """ Add a speech segment with the new tokens if necessary.
             May also remove the last collected segments if filtered out by Whisper (no_speech_prob <= no_speech_threshold)
         """
-        nonlocal segment_tokens, segment_attweights, ref_segment_attweights, timestamped_word_segments, segment_logprobs, has_started, no_speech_prob, chunk_tokens, chunk_tokens_nosot, chunk_logprobs, mfcc, new_mfcc, logit_filters, index_begin_30sec_chunck, last_token_fallback, num_inference_steps, last_chunk_token
+        nonlocal segment_tokens, segment_attweights, ref_segment_attweights, timestamped_word_segments, ref_align_segments, segment_logprobs, has_started, no_speech_prob, chunk_tokens, chunk_tokens_nosot, chunk_logprobs, mfcc, new_mfcc, logit_filters, index_begin_30sec_chunck, last_token_fallback, num_inference_steps, last_chunk_token
 
         # Check if a new segment should be added
         unfinished_decoding = False
@@ -760,6 +760,7 @@ def _transcribe_timestamped_efficient(
                     index_begin_30sec_chunck -= n_segments-i_start
                     segment_tokens = segment_tokens[:i_start] + [segment_tokens[-1]]
                     timestamped_word_segments = timestamped_word_segments[:i_start]
+                    ref_align_segments = ref_align_segments[:i_start]
                 elif compute_word_confidence:
                     avg_logprob = avg_logprob.item()
                     i_token_end = -1
@@ -1069,9 +1070,20 @@ def _transcribe_timestamped_naive(
 
     word_alignement_most_top_layers = float("inf") if word_alignement_most_top_layers is None else word_alignement_most_top_layers
 
-    audio = get_audio_tensor(audio)
-    text = get_ref_text_tensor(text)
-    audio_duration = audio.shape[-1] / SAMPLE_RATE
+    ref_text_processor = RefProcessor(model.dims.n_ref_text_ctx, model.is_multilingual, task=whisper_options["task"], language=language)
+    tokenizer = ref_text_processor.tokenizer
+
+    if type(audio) == str:
+        audio = load_audio(audio)
+    num_audio_samples = audio.shape[0]
+    num_mel_segs = -(-num_audio_samples // N_SAMPLES)
+    ref_input_tokens = []
+    ref_batch = ref_text_processor(text, num_mel_segments=num_mel_segs)
+    ref_text_seg_offset = ref_text_processor.get_segment_offset(text, num_segments=num_mel_segs)
+
+    # audio = get_audio_tensor(audio)
+    # text = get_ref_text_tensor(text)
+    audio_duration = num_audio_samples / SAMPLE_RATE
 
     if verbose and language is None and not whisper_options["verbose"]:
         # Reproduce whisper verbose (1/2)
@@ -1090,7 +1102,7 @@ def _transcribe_timestamped_naive(
     use_space = should_use_space(language)
 
     attention_weights = [[] for _ in range(min(word_alignement_most_top_layers,len(model.decoder.blocks) + len(model.decoder.ref_blocks) ))]
-
+    ref_transcription_result = []
     try:
 
         all_hooks = []
@@ -1237,13 +1249,15 @@ def _transcribe_timestamped_naive(
             tokens = tokens[i_start:] + [end_token]
             attention_weights = [w[:, :, i_start-1:, :] for w in attention_weights]
             ref_attention_weights = [w[:, :, i_start-1:, :] for w in ref_attention_weights]
+            
 
-            ws = perform_word_alignment(
+            ws, ref_align_result = perform_word_alignment(
                 tokens,
                 attention_weights,
                 ref_attention_weights,
-                text,
+                ref_batch[i_segment],
                 tokenizer,
+                ref_text_seg_offset = ref_text_seg_offset[i_segment],
                 use_space=use_space,
                 alignment_heads=alignment_heads,
                 remove_punctuation_from_words=remove_punctuation_from_words,
@@ -1315,6 +1329,8 @@ def _transcribe_timestamped_naive(
             if not trust_whisper_timestamps:
                 current_tokens = []
                 token_to_idx_segment = []
+
+            ref_transcription_result.append(ref_align_result)
 
     finally:
 
@@ -1953,6 +1969,7 @@ def split_tokens_on_unicode(tokens: list, tokenizer, remove_punctuation_from_wor
         current_tokens.append(token)
         decoded = tokenizer.decode_with_timestamps([t for t in current_tokens if t < tokenizer.eot or t >= tokenizer.timestamp_begin])
         if "\ufffd" not in decoded:
+        # if True: # temporarily accept unknown characters
             empty_tokens = [""] * (len(current_tokens)-1)
             punctuation = not isolate_punctuations and (decoded.strip() and decoded.strip() in _punctuation)
             previous_special = len(word_tokens_indices) > 0 and (word_tokens_indices[-1][-1] >= tokenizer.timestamp_begin)
@@ -1969,6 +1986,33 @@ def split_tokens_on_unicode(tokens: list, tokenizer, remove_punctuation_from_wor
                 word_tokens.append(empty_tokens + [decoded])
                 word_tokens_indices.append(current_tokens)
             current_tokens = []
+        else:
+            # delete first token to check whether that is the only unknown character
+            # new_current_tokens = current_tokens[1:]
+            # if len(new_current_tokens) == 0:
+            #     continue
+            for i in range(1, len(current_tokens)):
+                new_current_tokens = current_tokens[i:]
+                decoded = tokenizer.decode_with_timestamps([t for t in new_current_tokens if t < tokenizer.eot or t >= tokenizer.timestamp_begin])
+                if "\ufffd" not in decoded:
+                    empty_tokens = [""] * (len(new_current_tokens)-1)
+                    punctuation = not isolate_punctuations and (decoded.strip() and decoded.strip() in _punctuation)
+                    previous_special = len(word_tokens_indices) > 0 and (word_tokens_indices[-1][-1] >= tokenizer.timestamp_begin)
+                    if punctuation and not previous_special:
+                        if len(words) == 0:
+                            words = [""]
+                            word_tokens = [[]]
+                        if not remove_punctuation_from_words:
+                            words[-1] += decoded
+                        word_tokens[-1].extend(empty_tokens + [decoded])
+                        word_tokens_indices[-1].extend(new_current_tokens)
+                    else:
+                        words.append(decoded)
+                        word_tokens.append(empty_tokens + [decoded])
+                        word_tokens_indices.append(new_current_tokens)
+                    current_tokens = []
+                    break
+
 
     return words, word_tokens, word_tokens_indices
 
@@ -2527,7 +2571,7 @@ def cli():
         
     parser.add_argument("--temperature", default=0.0, help="temperature to use for sampling", type=float)
     parser.add_argument("--best_of", type=optional_int, default=None if USE_EFFICIENT_BY_DEFAULT else 5, help="number of candidates when sampling with non-zero temperature")
-    parser.add_argument("--beam_size", type=optional_int, default=None if USE_EFFICIENT_BY_DEFAULT else 5, help="number of beams in beam search, only applicable when temperature is zero")
+    parser.add_argument("--beam_size", type=optional_int, default=None if USE_EFFICIENT_BY_DEFAULT else 10, help="number of beams in beam search, only applicable when temperature is zero")
     parser.add_argument("--patience", type=float, default=None, help="optional patience value to use in beam decoding, as in https://arxiv.org/abs/2204.05424, the default (1.0) is equivalent to conventional beam search")
     parser.add_argument("--length_penalty", type=float, default=None, help="optional token length penalty coefficient (alpha) as in https://arxiv.org/abs/1609.08144, uses simple length normalization by default")
 
@@ -2660,8 +2704,8 @@ def cli():
     for audio_path, txt_path in tqdm(zip(audio_files, text_files)):
 
         outname = os.path.join(output_dir, os.path.basename(audio_path)) if output_dir else None
-        # if Path(outname + ".words.json").exists():
-        #     continue
+        if Path(outname + ".words.json").exists():
+            continue
         
         if use_simple_transcribe:
           result = model.transcribe(audio_path, txt_path, **whisper_options)
