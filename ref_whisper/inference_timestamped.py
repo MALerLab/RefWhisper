@@ -2671,7 +2671,7 @@ def cli():
       text_files = [x for x in text_files if x.stem in id_set]
       audio_files.sort()
       text_files.sort()
-      assert len(audio_files) == len(text_files), f"Number of audio files ({len(audio_files)}) and text files ({len(txt_files)}) do not match"
+      assert len(audio_files) == len(text_files), f"Number of audio files ({len(audio_files)}) and text files ({len(text_files)}) do not match"
       for audio_path, txt_path in zip(audio_files, text_files):
         assert audio_path.stem == txt_path.stem, f"File {audio_path} and {txt_path} do not have the same name"
       audio_files = [str(x) for x in audio_files]
@@ -2704,12 +2704,14 @@ def cli():
     for audio_path, txt_path in tqdm(zip(audio_files, text_files)):
 
         outname = os.path.join(output_dir, os.path.basename(audio_path)) if output_dir else None
-        if Path(outname + ".words.json").exists():
+        if outname and Path(outname + ".words.json").exists():
             continue
         
         if use_simple_transcribe:
           result = model.transcribe(audio_path, txt_path, **whisper_options)
-          if "json" in output_format:
+          if not outname:
+              json.dump(filtered_keys(result), sys.stdout, indent=2, ensure_ascii=False)
+          elif "json" in output_format:
               # save JSON
               with open(outname + ".json", "w", encoding="utf-8") as js:
                   json.dump(result, js, indent=2, ensure_ascii=False)
