@@ -13,6 +13,8 @@ matplotlib = "*"
 torchaudio = "*"
 tiktoken = "*"
 numba = "*"
+dtw-python = "*"
+scipy = "*"
 
 [dev-packages]
 
