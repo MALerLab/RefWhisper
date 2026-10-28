@@ -438,8 +438,14 @@ class RefProcessor:
     return slice_lines
 
   def _check_text_is_path(self, text:str):
-    if '\n' not in text and len(text) < 100 and Path(text).exists():
-      text = Path(text).read_text()
+    if isinstance(text, Path):
+      return text.read_text()
+    if '\n' not in text:
+      try:
+        if Path(text).is_file():
+          return Path(text).read_text()
+      except OSError: # a long single-line lyric is not a valid file name
+        pass
     return text
   
   def get_segment_offset(self, text:str, num_segments:int):
