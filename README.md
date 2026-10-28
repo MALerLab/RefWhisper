@@ -5,7 +5,7 @@ This is a repository for our paper on DLfM 2023, "Aligning Incomplete Lyrics of 
 The original dataset is available at [here](http://urisori.co.kr/urisori-en/doku.php?id=start)
 
 ## Requirements
-We recommend ``pipenv`` for installing the requirements. The requirements are given in ``Pipfile``.
+We recommend ``pipenv`` for installing the requirements. The requirements are given in ``Pipfile``. Python 3.11 is required (Pillow 13 needs Python >= 3.11, and torch 2.0.1 supports up to 3.11).
 ### Install pipenv and requirements
 ```
 pip install pipenv

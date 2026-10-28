@@ -10,6 +10,7 @@ tqdm = "*"
 wandb = "*"
 nlptutti = "*"
 matplotlib = "*"
+pillow = ">=13.0.0"
 torchaudio = "*"
 tiktoken = "*"
 numba = "*"
@@ -17,5 +18,4 @@ numba = "*"
 [dev-packages]
 
 [requires]
-python_version = "3.8"
-python_full_version = "3.8.10"
+python_version = "3.11"
